@@ -1,33 +1,14 @@
-const axios = require("axios");
 const os = require("os");
-const path = require("path");
-const { Worker } = require("worker_threads");
+const browserService = require("./browserService");
 const parser = require("../utils/parser");
 
 const BASE_URL = "https://boardgamegeek.com";
 const LISTING_PATH = "/browse/boardgame/page";
 const GAMES_PER_PAGE = 100;
 const REQUEST_DELAY_MS = 2000;
-const REQUEST_TIMEOUT_MS = 30000;
-
-const REQUEST_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.5",
-};
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchPage(url) {
-  const response = await axios.get(url, {
-    headers: REQUEST_HEADERS,
-    timeout: REQUEST_TIMEOUT_MS,
-  });
-
-  return response.data;
 }
 
 async function scrapeListingPages(count) {
@@ -39,7 +20,7 @@ async function scrapeListingPages(count) {
 
     console.log(`Scraping listing page ${page}/${pagesNeeded}...`);
 
-    const html = await fetchPage(url);
+    const html = await browserService.fetchPage(url);
     const links = parser.parseListingPage(html);
 
     allLinks.push(...links);
@@ -53,7 +34,7 @@ async function scrapeListingPages(count) {
 }
 
 async function scrapeGamePage(url) {
-  const html = await fetchPage(url);
+  const html = await browserService.fetchPage(url);
   const gameData = parser.parseGamePage(html);
 
   if (!gameData) {
@@ -76,55 +57,48 @@ async function scrapeGames(count, onGameScraped) {
   console.log(`Found ${gameLinks.length} game links. Scraping details...`);
 
   const cpuCount = os.cpus().length;
-  const workerCount = Math.max(1, Math.floor(cpuCount * 0.6));
+  const concurrency = Math.max(1, Math.floor(cpuCount * 0.6));
 
   console.log(
-    `Spawning ${workerCount} worker threads (${cpuCount} CPUs available, targeting 60%)...`,
+    `Scraping with ${concurrency} concurrent pages (${cpuCount} CPUs, targeting 60%)...`,
   );
 
-  const chunks = chunkArray(gameLinks, workerCount);
   const games = [];
   let scraped = 0;
+  let index = 0;
 
-  // Serialize onGameScraped calls to prevent concurrent file writes
+  // Serialize saves to prevent concurrent file writes
   let saveChain = Promise.resolve();
 
-  await new Promise((resolve, reject) => {
-    let completedWorkers = 0;
+  async function worker() {
+    while (true) {
+      const i = index++;
 
-    chunks.forEach((urls) => {
-      if (urls.length === 0) {
-        completedWorkers++;
-        if (completedWorkers === workerCount) resolve();
-        return;
+      if (i >= gameLinks.length) break;
+
+      const url = gameLinks[i];
+
+      try {
+        const gameData = await scrapeGamePage(url);
+
+        if (gameData) {
+          games.push(gameData);
+          scraped++;
+          console.log(`Scraped ${scraped}/${gameLinks.length}: ${url}`);
+
+          if (onGameScraped) {
+            saveChain = saveChain.then(() => onGameScraped(gameData));
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to scrape ${url}: ${error.message}`);
       }
 
-      const worker = new Worker(
-        path.join(__dirname, "../workers/scrapeWorker.js"),
-        { workerData: { urls } },
-      );
+      await delay(REQUEST_DELAY_MS);
+    }
+  }
 
-      worker.on("message", (msg) => {
-        if (msg.type === "game") {
-          games.push(msg.data);
-          scraped++;
-          console.log(`Scraped ${scraped}/${gameLinks.length}: ${msg.url}`);
-          if (onGameScraped) {
-            saveChain = saveChain.then(() => onGameScraped(msg.data));
-          }
-        } else if (msg.type === "error") {
-          console.error(`Failed to scrape ${msg.url}: ${msg.message}`);
-        } else if (msg.type === "done") {
-          completedWorkers++;
-          if (completedWorkers === workerCount) resolve();
-        }
-      });
-
-      worker.on("error", reject);
-    });
-  });
-
-  // Wait for any in-flight saves to finish
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   await saveChain;
 
   console.log(
