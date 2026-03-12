@@ -28,6 +28,25 @@ async function scrapeAndSave(req, res) {
   }
 }
 
+async function enrichBoxSize(req, res) {
+  try {
+    const result = await boardgameService.enrichBoardgamesWithBoxSize();
+
+    return res.json({
+      message: `Enriched ${result.updated}/${result.total} boardgames with box size.`,
+      ...result,
+    });
+  } catch (error) {
+    console.error("Box size enrichment failed:", error);
+
+    return res.status(500).json({
+      error: "Failed to enrich boardgames with box size.",
+      details: error.message,
+    });
+  }
+}
+
 module.exports = {
   scrapeAndSave,
+  enrichBoxSize,
 };
