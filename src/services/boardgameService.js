@@ -2,9 +2,11 @@ const scraperService = require("./scraperService");
 const boardgameRepository = require("../repositories/boardgameRepository");
 
 async function scrapeAndSaveBoardgames(count) {
-  const boardgames = await scraperService.scrapeGames(count);
+  await boardgameRepository.initBoardgamesFile();
 
-  await boardgameRepository.saveBoardgames(boardgames);
+  const boardgames = await scraperService.scrapeGames(count, (game) =>
+    boardgameRepository.appendBoardgame(game),
+  );
 
   return boardgames;
 }

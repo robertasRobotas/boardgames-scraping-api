@@ -16,6 +16,26 @@ async function saveBoardgames(boardgames) {
   console.log(`Saved ${boardgames.length} boardgames to ${FILE_PATH}`);
 }
 
+async function initBoardgamesFile() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(
+    FILE_PATH,
+    `const boardgames = [];\n\nmodule.exports = boardgames;\n`,
+    "utf-8",
+  );
+}
+
+async function appendBoardgame(game) {
+  const existing = await getBoardgames();
+  existing.push(game);
+
+  const fileContent =
+    `const boardgames = ${JSON.stringify(existing, null, 2)};\n` +
+    `\nmodule.exports = boardgames;\n`;
+
+  await fs.writeFile(FILE_PATH, fileContent, "utf-8");
+}
+
 async function getBoardgames() {
   try {
     const content = await fs.readFile(FILE_PATH, "utf-8");
@@ -34,4 +54,6 @@ async function getBoardgames() {
 module.exports = {
   saveBoardgames,
   getBoardgames,
+  initBoardgamesFile,
+  appendBoardgame,
 };

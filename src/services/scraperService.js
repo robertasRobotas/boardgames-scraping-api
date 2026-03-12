@@ -1,4 +1,7 @@
 const axios = require("axios");
+const os = require("os");
+const path = require("path");
+const { Worker } = require("worker_threads");
 const parser = require("../utils/parser");
 
 const BASE_URL = "https://boardgamegeek.com";
@@ -61,32 +64,68 @@ async function scrapeGamePage(url) {
   return gameData;
 }
 
-async function scrapeGames(count) {
+function chunkArray(arr, n) {
+  const chunks = Array.from({ length: n }, () => []);
+  arr.forEach((item, i) => chunks[i % n].push(item));
+  return chunks;
+}
+
+async function scrapeGames(count, onGameScraped) {
   const gameLinks = await scrapeListingPages(count);
 
   console.log(`Found ${gameLinks.length} game links. Scraping details...`);
 
+  const cpuCount = os.cpus().length;
+  const workerCount = Math.max(1, Math.floor(cpuCount * 0.6));
+
+  console.log(
+    `Spawning ${workerCount} worker threads (${cpuCount} CPUs available, targeting 60%)...`,
+  );
+
+  const chunks = chunkArray(gameLinks, workerCount);
   const games = [];
+  let scraped = 0;
 
-  for (let i = 0; i < gameLinks.length; i++) {
-    const url = gameLinks[i];
+  // Serialize onGameScraped calls to prevent concurrent file writes
+  let saveChain = Promise.resolve();
 
-    console.log(`Scraping game ${i + 1}/${gameLinks.length}: ${url}`);
+  await new Promise((resolve, reject) => {
+    let completedWorkers = 0;
 
-    try {
-      const gameData = await scrapeGamePage(url);
-
-      if (gameData) {
-        games.push(gameData);
+    chunks.forEach((urls) => {
+      if (urls.length === 0) {
+        completedWorkers++;
+        if (completedWorkers === workerCount) resolve();
+        return;
       }
-    } catch (error) {
-      console.error(`Failed to scrape ${url}: ${error.message}`);
-    }
 
-    if (i < gameLinks.length - 1) {
-      await delay(REQUEST_DELAY_MS);
-    }
-  }
+      const worker = new Worker(
+        path.join(__dirname, "../workers/scrapeWorker.js"),
+        { workerData: { urls } },
+      );
+
+      worker.on("message", (msg) => {
+        if (msg.type === "game") {
+          games.push(msg.data);
+          scraped++;
+          console.log(`Scraped ${scraped}/${gameLinks.length}: ${msg.url}`);
+          if (onGameScraped) {
+            saveChain = saveChain.then(() => onGameScraped(msg.data));
+          }
+        } else if (msg.type === "error") {
+          console.error(`Failed to scrape ${msg.url}: ${msg.message}`);
+        } else if (msg.type === "done") {
+          completedWorkers++;
+          if (completedWorkers === workerCount) resolve();
+        }
+      });
+
+      worker.on("error", reject);
+    });
+  });
+
+  // Wait for any in-flight saves to finish
+  await saveChain;
 
   console.log(
     `Successfully scraped ${games.length}/${gameLinks.length} games.`,
